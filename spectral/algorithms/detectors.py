@@ -4,7 +4,7 @@ Spectral target detection algorithms.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-__all__ = ['MatchedFilter', 'matched_filter', 'RX', 'rx', 'ace']
+__all__ = ['MatchedFilter', 'matched_filter', 'RX', 'rx', 'ace', 'krx']
 
 import math
 import numpy as np
@@ -674,4 +674,206 @@ def ace(X, target, background=None, window=None, cov=None, **kwargs):
         return np.clip(result, 0, 1, out=result)
     else:
         return np.clip(result, 0, 1)
+
+
+class KRX():
+    r'''An implementation of the Kenelized RX anomaly detector. Given the mean
+    and covariance of the background, this detector returns the squared
+    Mahalanobis distance of a spectrum according to
+
+    .. math::
+
+        y=(x-\mu_b)^T\Sigma^{-1}(x-\mu_b)
+
+    where `x` is the unknown pixel spectrum, :math:`\mu_b` is the background
+    mean, and :math:`\Sigma` is the background covariance.
+
+    References:
+
+    Reed, I.S. and Yu, X., "Adaptive multiple-band CFAR detection of an optical
+    pattern with unknown spectral distribution," IEEE Trans. Acoust.,
+    Speech, Signal Processing, vol. 38, pp. 1760-1770, Oct. 1990.
+    '''
+    # TODO SOS: cite correct paper
+
+    dim_out=1
+
+    def __init__(self, background=None):
+        '''Creates the detector, given optional background/target stats.
+
+        Arguments:
+
+            `background` (`GaussianStats`, default None):
+
+            The Gaussian statistics for the background (e.g., the result
+            of calling :func:`calc_stats`). If no background stats are
+            provided, they will be estimated based on data passed to the
+            detector.
+        '''
+        if background is not None:
+            self.set_background(background)
+        else:
+            self.background = None
+
+    def set_background(self, stats):
+        '''Sets background statistics to be used when applying the detector.'''
+        self.background = stats
+
+    def __call__(self, X):
+        '''Applies the RX anomaly detector to X.
+
+        Arguments:
+
+            `X` (numpy.ndarray):
+
+                For an image with shape (R, C, B), `X` can be a vector of
+                length B (single pixel) or an ndarray of shape (R, C, B) or
+                (R * C, B).
+
+        Returns numpy.ndarray or float:
+
+            The return value will be the RX detector score (squared Mahalanobis
+            distance) for each pixel given.  If `X` is a single pixel, a float
+            will be returned; otherwise, the return value will be an ndarray
+            of floats with one less dimension than the input.
+        '''
+        if not isinstance(X, np.ndarray):
+            raise TypeError('Expected a numpy.ndarray.')
+
+        if self.background is None:
+            self.set_background(calc_stats(X))
+
+        X = (X - self.background.mean)
+        C_1 = self.background.inv_cov
+
+        ndim = X.ndim
+        shape = X.shape
+
+        if ndim == 1:
+            return X.dot(C_1).dot(X)
+
+        if ndim == 3:
+            X = X.reshape((-1, X.shape[-1]))
+
+        A = X.dot(C_1)
+        r = np.einsum('ij,ij->i', A, X)
+        return r.reshape(shape[:-1])
+
+        # I tried using einsum for the above calculations but, surprisingly,
+        # it was *much* slower than using dot & sum. Need to figure out if
+        # that is due to multithreading or some other reason.
+
+#        print 'ndim =', ndim
+#        if ndim == 1:
+#            return np.einsum('i,ij,j', X, self.background.inv_cov, X)
+#        if ndim == 3:
+#            return np.einsum('ijk,km,ijm->ij',
+#                             X, self.background.inv_cov, X).squeeze()
+#        elif ndim == 2:
+#            return np.einsum('ik,km,im->i',
+#                             X, self.background.inv_cov, X).squeeze()
+#        else:
+#            raise Exception('Unexpected number of dimensions.')
+#
+
+def rx(X, background=None, window=None, cov=None):
+    r'''Computes Kernelized RX anomaly detector scores.
+
+    Usage:
+
+        y = rx(X [, background=bg])
+
+        y = rx(X, window=(inner, outer) [, cov=C])
+
+    The RX anomaly detector produces a detection statistic equal to the 
+    squared Mahalanobis distance of a spectrum from a background distribution
+    according to
+
+    .. math::
+
+        y=(x-\mu_b)^T\Sigma^{-1}(x-\mu_b)
+
+    where `x` is the pixel spectrum, :math:`\mu_b` is the background
+    mean, and :math:`\Sigma` is the background covariance.
+
+    Arguments:
+
+        `X` (numpy.ndarray):
+
+            For the first calling method shown, `X` can be an image with
+            shape (R, C, B) or an ndarray of shape (R * C, B). If the
+            `background` keyword is given, it will be used for the image
+            background statistics; otherwise, background statistics will be
+            computed from `X`.
+
+            If the `window` keyword is given, `X` must be a 3-dimensional
+            array and background statistics will be computed for each point
+            in the image using a local window defined by the keyword.
+
+
+        `background` (`GaussianStats`):
+
+            The Gaussian statistics for the background (e.g., the result
+            of calling :func:`calc_stats`). If no background stats are
+            provided, they will be estimated based on data passed to the
+            detector.
+
+        `window` (2-tuple of odd integers):
+
+            Must have the form (`inner`, `outer`), where the two values
+            specify the widths (in pixels) of inner and outer windows centered
+            about the pixel being evaulated. Both values must be odd integers.
+            The background mean and covariance will be estimated from pixels
+            in the outer window, excluding pixels within the inner window. For
+            example, if (`inner`, `outer`) = (5, 21), then the number of
+            pixels used to estimate background statistics will be
+            :math:`21^2 - 5^2 = 416`.
+
+            The window are modified near image borders, where full, centered
+            windows cannot be created. The outer window will be shifted, as
+            needed, to ensure that the outer window still has height and width
+            `outer` (in this situation, the pixel being evaluated will not be
+            at the center of the outer window). The inner window will be
+            clipped, as needed, near image borders. For example, assume an
+            image with 145 rows and columns. If the window used is
+            (5, 21), then for the image pixel at (0, 0) (upper left corner),
+            the the inner window will cover `image[:3, :3]` and the outer
+            window will cover `image[:21, :21]`. For the pixel at (50, 1), the
+            inner window will cover `image[48:53, :4]` and the outer window
+            will cover `image[40:51, :21]`.
+            
+        `cov` (ndarray):
+
+            An optional covariance to use. If this parameter is given, `cov`
+            will be used for all RX calculations (background covariance
+            will not be recomputed in each window) and only the background
+            mean will be recomputed in each window.
+
+    Returns numpy.ndarray:
+
+        The return value will be the RX detector score (squared Mahalanobis
+        distance) for each pixel given.  If `X` has shape (R, C, B), the
+        returned ndarray will have shape (R, C)..
+    
+    References:
+
+    Reed, I.S. and Yu, X., "Adaptive multiple-band CFAR detection of an optical
+    pattern with unknown spectral distribution," IEEE Trans. Acoust.,
+    Speech, Signal Processing, vol. 38, pp. 1760-1770, Oct. 1990.
+    '''
+    #TODO SOS: cite correct paper
+    if background is not None and window is not None:
+        raise ValueError('`background` and `window` keywords are mutually ' \
+                         'exclusive.')
+    if window is not None:
+        rx = RX()
+        def rx_wrapper(bg, x):
+            rx.set_background(bg)
+            return rx(x)
+        return map_outer_window_stats(rx_wrapper, X, window[0], window[1],
+                                      dim_out=1, cov=cov)
+    else:
+        return RX(background)(X)
+
+
 
