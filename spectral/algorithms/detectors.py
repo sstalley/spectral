@@ -9,6 +9,8 @@ __all__ = ['MatchedFilter', 'matched_filter', 'RX', 'rx', 'ace', 'krx']
 import math
 import numpy as np
 
+from sklearn.metrics.pairwise import pairwise_kernels, kernel_metrics
+
 from .algorithms import calc_stats
 from .transforms import LinearTransform
 from .spatial import map_outer_window_stats
@@ -43,39 +45,10 @@ class MatchedFilter(LinearTransform):
 
                 Length-K target mean
         '''
-        self.background = background
-        self.u_b = background.mean
         self.u_t = target
-        self._whitening_transform = None
 
         d_tb = (target - self.u_b)
         self.d_tb = d_tb
-        C_1 = background.inv_cov
-        self.C_1 = C_1
-
-        # Normalization coefficient (inverse of  squared Mahalanobis distance
-        # between u_t and u_b)
-        self.coef = 1.0 / d_tb.dot(C_1).dot(d_tb)
-
-        LinearTransform.__init__(
-            self, (self.coef * d_tb).dot(C_1), pre=-self.u_b)
-
-    def whiten(self, X):
-        '''Transforms data to the whitened space of the background.
-
-        Arguments:
-
-            `X` (ndarray):
-
-                Size (M,N,K) or (M*N,K) array of length K vectors to transform.
-
-        Returns an array of same size as `X` but linearly transformed to the
-        whitened space of the filter.
-        '''
-        if self._whitening_transform is None:
-            A = math.sqrt(self.coef) * self.background.sqrt_inv_cov
-            self._whitening_transform = LinearTransform(A, pre=-self.u_b)
-        return self._whitening_transform(X)
 
 def matched_filter(X, target, background=None, window=None, cov=None):
     r'''Computes a linear matched filter target detector score.
@@ -698,7 +671,7 @@ class KRX():
 
     dim_out=1
 
-    def __init__(self, background=None):
+    def __init__(self, target=None, metric="rbf"):
         '''Creates the detector, given optional background/target stats.
 
         Arguments:
@@ -710,14 +683,9 @@ class KRX():
             provided, they will be estimated based on data passed to the
             detector.
         '''
-        if background is not None:
-            self.set_background(background)
-        else:
-            self.background = None
+        self.target = target
+        self.metric = metric
 
-    def set_background(self, stats):
-        '''Sets background statistics to be used when applying the detector.'''
-        self.background = stats
 
     def __call__(self, X):
         '''Applies the RX anomaly detector to X.
@@ -740,24 +708,49 @@ class KRX():
         if not isinstance(X, np.ndarray):
             raise TypeError('Expected a numpy.ndarray.')
 
-        if self.background is None:
-            self.set_background(calc_stats(X))
-
-        X = (X - self.background.mean)
-        C_1 = self.background.inv_cov
 
         ndim = X.ndim
         shape = X.shape
 
-        if ndim == 1:
-            return X.dot(C_1).dot(X)
-
         if ndim == 3:
             X = X.reshape((-1, X.shape[-1]))
 
-        A = X.dot(C_1)
-        r = np.einsum('ij,ij->i', A, X)
-        return r.reshape(shape[:-1])
+        #Calculate the kernel gram matrix
+        K = pairwise_kernels(X, metric=self.metric)
+        print("K.shape:", K.shape)
+
+        K_u = np.mean(K, axis=0) - np.mean(K)
+        print("K_u.shape:", K_u.shape)
+
+
+        print("X.shape:", X.shape)
+        print("self.target.shape:", self.target.shape)
+
+        #Calculate the distance to the targets
+        if self.target is not None:
+            k_targ = pairwise_kernels(X, Y=np.expand_dims(self.target, axis=0), metric=self.metric).flatten()
+        else: # no target specified, find anomolies instead
+            k_targ = np.diagonal(K) #I think this should be all 0's - need to confirm
+        print("k_targ.shape:", k_targ.shape)
+
+        K_r = k_targ - np.mean(k_targ)
+        print("K_r.shape:", K_r.shape)
+
+        K_r_u = K_r - K_u
+        print("K_r_u.shape:", K_r_u.shape)
+
+        #Center the K for the covariance calculation
+        k_m = np.mean(K, axis=0)
+        print("k_m.shape:", k_m.shape)
+        K_b = K - k_m - k_m[:, np.newaxis] + np.mean(k_m)
+        print("K_b.shape:", K_b.shape)
+
+        K_b_inv = np.linalg.pinv(K_b, hermitian=True)
+        print("K_b_inv.shape:", K_b_inv.shape)
+
+        RX = K_r_u @ K_b_inv @ K_r_u.T
+
+        return RX
 
         # I tried using einsum for the above calculations but, surprisingly,
         # it was *much* slower than using dot & sum. Need to figure out if
@@ -776,14 +769,12 @@ class KRX():
 #            raise Exception('Unexpected number of dimensions.')
 #
 
-def rx(X, background=None, window=None, cov=None):
+def krx(X, target=None, metric="rbf"):
     r'''Computes Kernelized RX anomaly detector scores.
 
     Usage:
 
         y = rx(X [, background=bg])
-
-        y = rx(X, window=(inner, outer) [, cov=C])
 
     The RX anomaly detector produces a detection statistic equal to the 
     squared Mahalanobis distance of a spectrum from a background distribution
@@ -806,49 +797,6 @@ def rx(X, background=None, window=None, cov=None):
             background statistics; otherwise, background statistics will be
             computed from `X`.
 
-            If the `window` keyword is given, `X` must be a 3-dimensional
-            array and background statistics will be computed for each point
-            in the image using a local window defined by the keyword.
-
-
-        `background` (`GaussianStats`):
-
-            The Gaussian statistics for the background (e.g., the result
-            of calling :func:`calc_stats`). If no background stats are
-            provided, they will be estimated based on data passed to the
-            detector.
-
-        `window` (2-tuple of odd integers):
-
-            Must have the form (`inner`, `outer`), where the two values
-            specify the widths (in pixels) of inner and outer windows centered
-            about the pixel being evaulated. Both values must be odd integers.
-            The background mean and covariance will be estimated from pixels
-            in the outer window, excluding pixels within the inner window. For
-            example, if (`inner`, `outer`) = (5, 21), then the number of
-            pixels used to estimate background statistics will be
-            :math:`21^2 - 5^2 = 416`.
-
-            The window are modified near image borders, where full, centered
-            windows cannot be created. The outer window will be shifted, as
-            needed, to ensure that the outer window still has height and width
-            `outer` (in this situation, the pixel being evaluated will not be
-            at the center of the outer window). The inner window will be
-            clipped, as needed, near image borders. For example, assume an
-            image with 145 rows and columns. If the window used is
-            (5, 21), then for the image pixel at (0, 0) (upper left corner),
-            the the inner window will cover `image[:3, :3]` and the outer
-            window will cover `image[:21, :21]`. For the pixel at (50, 1), the
-            inner window will cover `image[48:53, :4]` and the outer window
-            will cover `image[40:51, :21]`.
-            
-        `cov` (ndarray):
-
-            An optional covariance to use. If this parameter is given, `cov`
-            will be used for all RX calculations (background covariance
-            will not be recomputed in each window) and only the background
-            mean will be recomputed in each window.
-
     Returns numpy.ndarray:
 
         The return value will be the RX detector score (squared Mahalanobis
@@ -861,19 +809,9 @@ def rx(X, background=None, window=None, cov=None):
     pattern with unknown spectral distribution," IEEE Trans. Acoust.,
     Speech, Signal Processing, vol. 38, pp. 1760-1770, Oct. 1990.
     '''
-    #TODO SOS: cite correct paper
-    if background is not None and window is not None:
-        raise ValueError('`background` and `window` keywords are mutually ' \
-                         'exclusive.')
-    if window is not None:
-        rx = RX()
-        def rx_wrapper(bg, x):
-            rx.set_background(bg)
-            return rx(x)
-        return map_outer_window_stats(rx_wrapper, X, window[0], window[1],
-                                      dim_out=1, cov=cov)
-    else:
-        return RX(background)(X)
+    #TODO SOS: update this block
+    if metric not in kernel_metrics():
+        raise ValueError('`%` is not a supported metric.' % metric)
 
 
-
+    return KRX(target=target, metric=metric)(X)
