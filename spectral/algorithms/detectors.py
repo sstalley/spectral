@@ -671,7 +671,7 @@ class KRX():
 
     dim_out=1
 
-    def __init__(self, target=None, metric="rbf"):
+    def __init__(self, target=None, target2=None, metric="rbf"):
         '''Creates the detector, given optional background/target stats.
 
         Arguments:
@@ -684,6 +684,7 @@ class KRX():
             detector.
         '''
         self.target = target
+        self.target2 = target2
         self.metric = metric
 
 
@@ -739,6 +740,16 @@ class KRX():
         K_r_u = K_r - K_u
         print("K_r_u.shape:", K_r_u.shape)
 
+        if self.target2 is not None:
+            k_targ2 = pairwise_kernels(X, self.target2, metric=self.metric)
+            # how about these guyz?
+            K_r = k_targ2 - np.mean(k_targ2, axis=0)
+            K_r2 = K - np.mean(K, axis=0) #Not sure about the axis
+            print("K_r2.shape:", K_r2.shape)
+            K_r2_u = K_r2 - K_u
+            print("K_r2_u.shape:", K_r2_u.shape)
+
+
         #Center the K for the covariance calculation
         k_m = np.mean(K, axis=0)
         print("k_m.shape:", k_m.shape)
@@ -748,7 +759,10 @@ class KRX():
         K_b_inv = np.linalg.pinv(K_b, hermitian=True)
         print("K_b_inv.shape:", K_b_inv.shape)
 
-        RX = K_r_u @ K_b_inv @ K_r_u.T
+        if self.target2 is None:
+            RX = K_r_u @ K_b_inv @ K_r_u.T
+        else:
+            RX = K_r_u @ K_b_inv @ K_r2_u.T
 
         return RX
 
@@ -769,7 +783,7 @@ class KRX():
 #            raise Exception('Unexpected number of dimensions.')
 #
 
-def krx(X, target=None, metric="rbf"):
+def krx(X, target=None, target2=None, metric="rbf"):
     r'''Computes Kernelized RX anomaly detector scores.
 
     Usage:
@@ -814,4 +828,4 @@ def krx(X, target=None, metric="rbf"):
         raise ValueError('`%` is not a supported metric.' % metric)
 
 
-    return KRX(target=target, metric=metric)(X)
+    return KRX(target=target, target2=target2, metric=metric)(X)
