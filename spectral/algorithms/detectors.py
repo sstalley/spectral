@@ -648,6 +648,18 @@ def ace(X, target, background=None, window=None, cov=None, **kwargs):
     else:
         return np.clip(result, 0, 1)
 
+def calc_K_b_inv(K):
+    #Center the K for the covariance calculation
+    k_m = np.mean(K, axis=0)
+    print("k_m.shape:", k_m.shape)
+    K_b = K - k_m - k_m[:, np.newaxis] + np.mean(k_m)
+    print("K_b.shape:", K_b.shape)
+
+    K_b_inv = np.linalg.pinv(K_b, hermitian=True)
+    print("K_b_inv.shape:", K_b_inv.shape)
+
+    return K_b_inv
+
 
 class KRX():
     r'''An implementation of the Kenelized RX anomaly detector. Given the mean
@@ -671,7 +683,7 @@ class KRX():
 
     dim_out=1
 
-    def __init__(self, target=None, target2=None, metric="rbf"):
+    def __init__(self, target=None, target2=None, metric="rbf", K_b_inv=None):
         '''Creates the detector, given optional background/target stats.
 
         Arguments:
@@ -686,6 +698,7 @@ class KRX():
         self.target = target
         self.target2 = target2
         self.metric = metric
+        self.K_b_inv = K_b_inv
 
 
     def __call__(self, X):
@@ -749,15 +762,10 @@ class KRX():
             K_r2_u = K_r2 - K_u
             print("K_r2_u.shape:", K_r2_u.shape)
 
-
-        #Center the K for the covariance calculation
-        k_m = np.mean(K, axis=0)
-        print("k_m.shape:", k_m.shape)
-        K_b = K - k_m - k_m[:, np.newaxis] + np.mean(k_m)
-        print("K_b.shape:", K_b.shape)
-
-        K_b_inv = np.linalg.pinv(K_b, hermitian=True)
-        print("K_b_inv.shape:", K_b_inv.shape)
+        if self.K_b_inv is None:
+            K_b_inv = calc_K_b_inv(K)
+        else:
+            K_b_inv = self.K_b_inv
 
         if self.target2 is None:
             RX = K_r_u @ K_b_inv @ K_r_u.T
@@ -783,7 +791,7 @@ class KRX():
 #            raise Exception('Unexpected number of dimensions.')
 #
 
-def krx(X, target=None, target2=None, metric="rbf"):
+def krx(X, target=None, target2=None, metric="rbf", K_b_inv=None):
     r'''Computes Kernelized RX anomaly detector scores.
 
     Usage:
@@ -828,4 +836,4 @@ def krx(X, target=None, target2=None, metric="rbf"):
         raise ValueError('`%` is not a supported metric.' % metric)
 
 
-    return KRX(target=target, target2=target2, metric=metric)(X)
+    return KRX(target=target, target2=target2, metric=metric, K_b_inv=K_b_inv)(X)
