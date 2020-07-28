@@ -8,6 +8,7 @@ __all__ = ['MatchedFilter', 'matched_filter', 'RX', 'rx', 'ace', 'krx']
 
 import math
 import numpy as np
+import matplotlib.pyplot as plt
 
 from sklearn.metrics.pairwise import pairwise_kernels, kernel_metrics
 
@@ -648,15 +649,35 @@ def ace(X, target, background=None, window=None, cov=None, **kwargs):
     else:
         return np.clip(result, 0, 1)
 
+def plt_matrix(X, name):
+    plt.imshow(X)
+    plt.colorbar()
+    plt.title(name)
+    plt.savefig("./" + name + ".png", dpi=300)
+    plt.close()
+
 def calc_K_b_inv(K):
+
+    plt_matrix(K, "K")
+
     #Center the K for the covariance calculation
     k_m = np.mean(K, axis=0)
     print("k_m.shape:", k_m.shape)
-    K_b = K - k_m - k_m[:, np.newaxis] + np.mean(k_m)
+    K_b = K - k_m[np.newaxis, :] - k_m[:, np.newaxis] + np.mean(k_m)
     print("K_b.shape:", K_b.shape)
+
+    plt_matrix(K_b, "K_b")
+    
+    #Sanity check - this should blow up if not psd
+    assert np.allclose(K_b, K_b.T)
 
     K_b_inv = np.linalg.pinv(K_b, hermitian=True)
     print("K_b_inv.shape:", K_b_inv.shape)
+
+    plt_matrix(K_b_inv, "K_b_inv")
+
+    #Sanity check - this should blow up if not psd
+    assert np.allclose(K_b_inv, K_b_inv.T)
 
     return K_b_inv
 
@@ -731,36 +752,26 @@ class KRX():
 
         #Calculate the kernel gram matrix
         K = pairwise_kernels(X, metric=self.metric)
-        print("K.shape:", K.shape)
 
         K_u = np.mean(K, axis=0) - np.mean(K)
-        print("K_u.shape:", K_u.shape)
-
-
-        print("X.shape:", X.shape)
-        print("self.target.shape:", self.target.shape)
 
         #Calculate the distance to the targets
         if self.target is not None:
             k_targ = pairwise_kernels(X, Y=np.expand_dims(self.target, axis=0), metric=self.metric).flatten()
         else: # no target specified, find anomolies instead
+            print("target not specified...")
             k_targ = np.diagonal(K) #I think this should be all 0's - need to confirm
-        print("k_targ.shape:", k_targ.shape)
 
         K_r = k_targ - np.mean(k_targ)
-        print("K_r.shape:", K_r.shape)
 
         K_r_u = K_r - K_u
-        print("K_r_u.shape:", K_r_u.shape)
 
         if self.target2 is not None:
             k_targ2 = pairwise_kernels(X, self.target2, metric=self.metric)
             # how about these guyz?
             K_r = k_targ2 - np.mean(k_targ2, axis=0)
             K_r2 = K - np.mean(K, axis=0) #Not sure about the axis
-            print("K_r2.shape:", K_r2.shape)
             K_r2_u = K_r2 - K_u
-            print("K_r2_u.shape:", K_r2_u.shape)
 
         if self.K_b_inv is None:
             K_b_inv = calc_K_b_inv(K)
@@ -768,6 +779,7 @@ class KRX():
             K_b_inv = self.K_b_inv
 
         if self.target2 is None:
+            print("target2 not specified...")
             RX = K_r_u @ K_b_inv @ K_r_u.T
         else:
             RX = K_r_u @ K_b_inv @ K_r2_u.T
