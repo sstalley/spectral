@@ -668,10 +668,13 @@ def calc_K_b_inv(K):
 
     plt_matrix(K_b, "K_b")
     
-    #Sanity check - this should blow up if not psd
     assert np.allclose(K_b, K_b.T)
 
-    K_b_inv = np.linalg.pinv(K_b, hermitian=True)
+    u, s, vh = np.linalg.svd(K_b)
+    K_b_inv = (u * np.power(s, -2)) @ vh
+
+    # K_b_inv = np.linalg.pinv(K_b, hermitian=True)
+    # K_b_inv = K_b_inv @ K_b_inv  #make it ^-2
     print("K_b_inv.shape:", K_b_inv.shape)
 
     plt_matrix(K_b_inv, "K_b_inv")
@@ -769,8 +772,7 @@ class KRX():
         if self.target2 is not None:
             k_targ2 = pairwise_kernels(X, self.target2, metric=self.metric)
             # how about these guyz?
-            K_r = k_targ2 - np.mean(k_targ2, axis=0)
-            K_r2 = K - np.mean(K, axis=0) #Not sure about the axis
+            K_r2 = k_targ2 - np.mean(k_targ2) #Not sure about the axis
             K_r2_u = K_r2 - K_u
 
         if self.K_b_inv is None:
@@ -780,9 +782,9 @@ class KRX():
 
         if self.target2 is None:
             print("target2 not specified...")
-            RX = K_r_u @ K_b_inv @ K_r_u.T
+            RX = K_r_u.T @ K_b_inv @ K_r_u
         else:
-            RX = K_r_u @ K_b_inv @ K_r2_u.T
+            RX = K_r_u.T @ K_b_inv @ K_r2_u
 
         return RX
 
